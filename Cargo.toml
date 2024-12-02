@@ -1,8 +1,9 @@
 [workspace]
 members = ["s3"]
+resolver = "2"
 
 [workspace.package]
-edition = "2024"
+edition = "2021"
 
 [workspace.dependencies]
 axum = "0.7.9"

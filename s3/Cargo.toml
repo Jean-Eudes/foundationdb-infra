@@ -1,5 +1,7 @@
 [package]
 name = "foundationdb-s3"
+edition.workspace = true
 
 [dependencies]
 axum = {workspace = true}
+tokio = { version = "1.41.1", features = ["macros", "rt-multi-thread"] }
