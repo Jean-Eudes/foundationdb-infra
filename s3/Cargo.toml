@@ -1,0 +1,5 @@
+[package]
+name = "foundationdb-s3"
+
+[dependencies]
+axum = {workspace = true}
