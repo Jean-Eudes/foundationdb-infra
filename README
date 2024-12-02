@@ -1,0 +1,9 @@
+# simple example of S3 server build in front if foundationdb
+
+  - init project
+  - first endpoint with axum
+  - save and load file with axum on disk
+  - save file with one key on foundationdb (only little file)
+  - create a transaction to store middle file in many key.
+  - add bucket
+  - add habilitation
