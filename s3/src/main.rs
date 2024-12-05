@@ -1,15 +1,16 @@
 use std::io::Read;
 
+use axum::response::IntoResponse;
 use axum::{
-    body::{Body, Bytes},
+    body::Body,
     extract::Path,
     routing::{get, put},
     Router,
 };
+use futures::stream::StreamExt;
 
-use axum::response::IntoResponse;
 async fn get_object<'a>() -> &'a str {
-    "Hello, World!"
+    "Hello, World! "
 }
 
 async fn download(Path(file_name): Path<String>) -> impl IntoResponse {
@@ -23,30 +24,35 @@ async fn download(Path(file_name): Path<String>) -> impl IntoResponse {
         .bytes()
         .collect::<Result<Vec<u8>, _>>()
         .unwrap();
-    // let bytes.as_slice();
-    // let bytes = Bytes::from(pdf_buf);
     let body = Body::from(bytes);
     body
 }
 
-async fn put_object(Path(file_name): Path<String>, body: Bytes) -> String {
+async fn put_object(Path(file_name): Path<String>, body: Body) -> String {
     let db = foundationdb::Database::default().unwrap();
 
-    let value = &file_name;
-    let tmp = &body;
-    match db
-        .run(|trx, _maybe_committed| async move {
-            trx.set(&value.as_bytes(), &tmp[..]);
-            Ok(())
-        })
-        .await
-    {
-        Ok(_) => println!("transaction committed"),
-        Err(_) => eprintln!("cannot commit transaction"),
-    };
+    let mut stream = body.into_data_stream();
 
-    // println!(body.);
-    "lol".to_string()
+    let transaction = db.create_trx().unwrap();
+    let mut part = 1;
+    let mut size: usize = 0;
+    while let Some(message) = stream.next().await {
+        let data = &message.unwrap()[..];
+        transaction.set(
+            format!("{}/data/{}", &file_name, part).as_bytes(),
+            data,
+        );
+        size += data.len();
+        part = part + 1;
+    }
+    transaction.set(
+        format!("{}/size", &file_name).as_bytes(),
+        &size.to_ne_bytes(),
+    );
+
+    let _ = transaction.commit().await;
+
+    file_name
 }
 
 #[tokio::main]
