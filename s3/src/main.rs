@@ -32,7 +32,6 @@ async fn download(Path(file_name): Path<String>) -> impl IntoResponse {
 async fn put_object(Path(file_name): Path<String>, body: Bytes) -> String {
     let db = foundationdb::Database::default().unwrap();
 
-    println!("{}", file_name);
     let value = &file_name;
     let tmp = &body;
     match db

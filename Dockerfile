@@ -13,14 +13,16 @@ RUN apt-get update; apt-get install -y --no-install-recommends libclang-dev
 WORKDIR /app
 
 # Copy only the necessary files for dependency resolution
+RUN mkdir s3
 COPY Cargo.toml Cargo.lock ./
-COPY s3 ./s3
-# RUN mkdir src && echo "fn main() {}" > src/main.rs
-# RUN cargo build --release
+COPY s3/Cargo.toml s3/
+RUN mkdir s3/src && echo "fn main() {}" > s3/src/main.rs
+RUN cargo build --release
 
 # Copy the rest of the source code
 # COPY src ./src
 
+COPY s3 ./s3
 # Build the Rust project
 RUN cargo build --release
 
