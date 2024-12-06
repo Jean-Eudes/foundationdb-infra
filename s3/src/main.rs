@@ -1,5 +1,3 @@
-use std::io::Cursor;
-use std::usize;
 use axum::response::IntoResponse;
 use axum::{
     body::Body,
@@ -7,9 +5,14 @@ use axum::{
     routing::{get, put},
     Router,
 };
+use byteorder::{BigEndian, ReadBytesExt};
+use bytes::{Buf, BufMut, BytesMut};
 use foundationdb::RangeOption;
 use futures::stream::StreamExt;
-use byteorder::{BigEndian, ReadBytesExt};
+use std::io::Cursor;
+use std::usize;
+
+const MAX_SIZE: usize = 90 * 1024;
 
 async fn get_object<'a>() -> &'a str {
     "Hello, World! "
@@ -21,14 +24,13 @@ async fn download(Path(file_name): Path<String>) -> impl IntoResponse {
     let trx = db.create_trx().unwrap();
     let begin = format!("{}/data/", &file_name);
     let end = format!("{}/datb", &file_name);
-    let opt = RangeOption::from((
-        begin.as_bytes(),
-        end.as_bytes(),
-    ));
+    let opt = RangeOption::from((begin.as_bytes(), end.as_bytes()));
 
     let mut x = trx.get_ranges_keyvalues(opt, false);
 
-    let size = trx.get(format!("{}/size", &file_name).as_bytes(), false).await;
+    let size = trx
+        .get(format!("{}/size", &file_name).as_bytes(), false)
+        .await;
     let vec = size.unwrap().unwrap().to_vec();
     let i = Cursor::new(vec).read_uint::<BigEndian>(8).unwrap();
     println!("download file {} with size {}", &file_name, i);
@@ -47,27 +49,70 @@ async fn put_object(Path(file_name): Path<String>, body: Body) -> String {
     let db = foundationdb::Database::default().unwrap();
 
     let mut stream = body.into_data_stream();
+    let mut buffer = BytesMut::with_capacity(MAX_SIZE);
 
     let transaction = db.create_trx().unwrap();
     let mut part = 1;
     let mut size: usize = 0;
     while let Some(message) = stream.next().await {
-        let data = &message.unwrap()[..];
-        println!("{}-{} : {}", &file_name, part, data.len());
-        transaction.set(format!("{}/data/{}", &file_name, part).as_bytes(), data);
+        println!("download file {}", &file_name);
+        let mut data = &message.unwrap()[..];
         size += data.len();
-        part = part + 1;
+        println!("{}-{} : {}", &file_name, part, data.len());
+        println!("remaining : {}", buffer.remaining());
+        println!("capacity : {}", buffer.capacity());
+        println!("len : {}", buffer.len());
+        if buffer.len() + data.len() < MAX_SIZE {
+            println!("put data in buffer");
+            buffer.put_slice(&data);
+            continue;
+        }
+
+        if buffer.len() + data.len() == MAX_SIZE {
+            println!("put data in buffer and set");
+            buffer.put_slice(&data);
+            transaction.set(format!("{}/data/{}", &file_name, part).as_bytes(), &buffer[..]);
+            part = part + 1;
+            buffer.clear();
+            continue;
+        }
+
+        while buffer.len() + data.len() >= MAX_SIZE {
+            println!("put data in buffer, loop and set");
+
+            let remaining_capacity = MAX_SIZE - buffer.len();
+            buffer.put_slice(&data[0..remaining_capacity]);
+            transaction.set(format!("{}/data/{}", &file_name, part).as_bytes(), &buffer[..]);
+            buffer.clear();
+            part = part + 1;
+            data = &data[remaining_capacity..];
+        }
+
+        let remaining = &data[0..data.len()];
+        buffer.put_slice(remaining);
+
     }
     transaction.set(
         format!("{}/size", &file_name).as_bytes(),
         &size.to_ne_bytes(),
     );
 
+    if buffer.len() != 0 {
+        println!("set last data {}", buffer[..].len());
+        transaction.set(format!("{}/data/{}", &file_name, part).as_bytes(), &buffer[..]);
+    }
+
+    println!("start commit");
     let commit = transaction.commit().await;
+    println!("commit done");
 
     match commit {
-        Ok(_) => {println!("commit success")},
-        Err(e) => {eprintln!("commit failed, {}", e)}
+        Ok(_) => {
+            println!("commit success")
+        }
+        Err(e) => {
+            eprintln!("commit failed, {}", e)
+        }
     }
 
     file_name

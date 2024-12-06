@@ -40,7 +40,7 @@ RUN dpkg -i foundationdb-clients_${FDB_VERSION}-1_amd64.deb
 
 WORKDIR /app
 
-RUN echo "docker:docker@10.88.0.3:4500" > /etc/foundationdb/fdb.cluster
+RUN echo "docker:docker@10.88.0.2:4500" > /etc/foundationdb/fdb.cluster
 
 # Copy the built artifact from the build stage
 COPY --from=builder /app/target/release/foundationdb-s3 .

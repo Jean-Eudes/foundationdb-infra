@@ -4,6 +4,7 @@ edition.workspace = true
 
 [dependencies]
 axum = {workspace = true}
+bytes = {workspace = true}
 foundationdb = { version = "0.9.1", features = ["embedded-fdb-include", "fdb-7_3"] }
 futures = "0.3.31"
 # foundationdb = {workspace = true}
