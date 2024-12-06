@@ -8,3 +8,4 @@ foundationdb = { version = "0.9.1", features = ["embedded-fdb-include", "fdb-7_3
 futures = "0.3.31"
 # foundationdb = {workspace = true}
 tokio = { version = "1.41.1", features = ["macros", "rt-multi-thread"] }
+byteorder = "1.5.0"

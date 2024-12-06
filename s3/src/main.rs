@@ -1,5 +1,5 @@
-use std::io::Read;
-
+use std::io::Cursor;
+use std::usize;
 use axum::response::IntoResponse;
 use axum::{
     body::Body,
@@ -7,7 +7,9 @@ use axum::{
     routing::{get, put},
     Router,
 };
+use foundationdb::RangeOption;
 use futures::stream::StreamExt;
+use byteorder::{BigEndian, ReadBytesExt};
 
 async fn get_object<'a>() -> &'a str {
     "Hello, World! "
@@ -17,14 +19,27 @@ async fn download(Path(file_name): Path<String>) -> impl IntoResponse {
     let db = foundationdb::Database::default().unwrap();
 
     let trx = db.create_trx().unwrap();
-    let time = trx.get(&file_name.as_bytes(), false).await.unwrap();
+    let begin = format!("{}/data/", &file_name);
+    let end = format!("{}/datb", &file_name);
+    let opt = RangeOption::from((
+        begin.as_bytes(),
+        end.as_bytes(),
+    ));
 
-    let bytes = time
-        .unwrap()
-        .bytes()
-        .collect::<Result<Vec<u8>, _>>()
-        .unwrap();
-    let body = Body::from(bytes);
+    let mut x = trx.get_ranges_keyvalues(opt, false);
+
+    let size = trx.get(format!("{}/size", &file_name).as_bytes(), false).await;
+    let vec = size.unwrap().unwrap().to_vec();
+    let i = Cursor::new(vec).read_uint::<BigEndian>(8).unwrap();
+    println!("download file {} with size {}", &file_name, i);
+    let mut vec = vec![];
+    while let Some(message) = x.next().await {
+        let value = message.unwrap();
+        let data = value.value();
+        vec.extend(data)
+    }
+
+    let body = Body::from(vec);
     body
 }
 
@@ -38,10 +53,8 @@ async fn put_object(Path(file_name): Path<String>, body: Body) -> String {
     let mut size: usize = 0;
     while let Some(message) = stream.next().await {
         let data = &message.unwrap()[..];
-        transaction.set(
-            format!("{}/data/{}", &file_name, part).as_bytes(),
-            data,
-        );
+        println!("{}-{} : {}", &file_name, part, data.len());
+        transaction.set(format!("{}/data/{}", &file_name, part).as_bytes(), data);
         size += data.len();
         part = part + 1;
     }
@@ -50,7 +63,12 @@ async fn put_object(Path(file_name): Path<String>, body: Body) -> String {
         &size.to_ne_bytes(),
     );
 
-    let _ = transaction.commit().await;
+    let commit = transaction.commit().await;
+
+    match commit {
+        Ok(_) => {println!("commit success")},
+        Err(e) => {eprintln!("commit failed, {}", e)}
+    }
 
     file_name
 }

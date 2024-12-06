@@ -256,6 +256,7 @@ name = "foundationdb-s3"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "byteorder",
  "foundationdb",
  "futures",
  "tokio",
