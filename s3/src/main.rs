@@ -11,7 +11,7 @@ use foundationdb::RangeOption;
 use futures::stream::StreamExt;
 use std::io::Cursor;
 use std::usize;
-use foundationdb::tuple::pack;
+use foundationdb::tuple::{pack, Subspace};
 
 const MAX_SIZE: usize = 90 * 1024;
 
@@ -23,10 +23,9 @@ async fn download(Path(file_name): Path<String>) -> impl IntoResponse {
     let db = foundationdb::Database::default().unwrap();
 
     let trx = db.create_trx().unwrap();
-    let begin = (&file_name, "data", 1);
-    let end = (&file_name, "data", usize::MAX);
+    let file_name_key = Subspace::from((&file_name, "data"));
 
-    let opt = RangeOption::from((pack(&begin), pack(&end)));
+    let opt = RangeOption::from(file_name_key.range());
 
     let mut x = trx.get_ranges_keyvalues(opt, false);
 
@@ -56,6 +55,8 @@ async fn put_object(Path(file_name): Path<String>, body: Body) -> String {
     let transaction = db.create_trx().unwrap();
     let mut part = 1;
     let mut size: usize = 0;
+    let file_name_key = Subspace::from(&file_name);
+    let data_key = file_name_key.subspace(&"data");
     while let Some(message) = stream.next().await {
         println!("download file {}", &file_name);
         let mut data = &message.unwrap()[..];
@@ -67,8 +68,8 @@ async fn put_object(Path(file_name): Path<String>, body: Body) -> String {
 
         if buffer.len() + data.len() == MAX_SIZE {
             buffer.put_slice(&data);
-            let key = (&file_name, "data", part);
-            transaction.set(&pack(&key), &buffer[..]);
+            // let key = (&data_key, part);
+            transaction.set(&data_key.pack(&part), &buffer[..]);
             part = part + 1;
             buffer.clear();
             continue;
@@ -77,8 +78,7 @@ async fn put_object(Path(file_name): Path<String>, body: Body) -> String {
         while buffer.len() + data.len() >= MAX_SIZE {
             let remaining_capacity = MAX_SIZE - buffer.len();
             buffer.put_slice(&data[0..remaining_capacity]);
-            let key = (&file_name, "data", part);
-            transaction.set(&pack(&key), &buffer[..]);
+            transaction.set(&data_key.pack(&part), &buffer[..]);
             buffer.clear();
             part = part + 1;
             data = &data[remaining_capacity..];
@@ -94,8 +94,7 @@ async fn put_object(Path(file_name): Path<String>, body: Body) -> String {
     );
 
     if buffer.len() != 0 {
-        let key = (&file_name, "data", part);
-        transaction.set(&pack(&key), &buffer[..]);
+        transaction.set(&data_key.pack(&part), &buffer[..]);
     }
 
     println!("start commit");
