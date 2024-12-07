@@ -26,7 +26,7 @@ COPY s3 ./s3
 # Build the Rust project
 RUN cargo build --release
 
-RUN ls target/release
+RUN ls -l target/release
 # Final Stage
 FROM debian:bullseye
 ARG FDB_VERSION

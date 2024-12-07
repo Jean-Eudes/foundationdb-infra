@@ -8,4 +8,4 @@ edition = "2021"
 [workspace.dependencies]
 axum = "0.7.9"
 bytes = "1.9.0"
-# foundationdb = "0.9.1"
+foundationdb = { version = "0.9.1", features = ["embedded-fdb-include", "fdb-7_3"] }
