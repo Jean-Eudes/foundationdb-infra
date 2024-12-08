@@ -13,6 +13,7 @@ use foundationdb::{Database, RangeOption};
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use std::usize;
+use tokio::join;
 
 const MAX_SIZE: usize = 90 * 1024;
 const DATA_PREFIX: &'static str = "data";
@@ -26,10 +27,7 @@ async fn get_object<'a>() -> &'a str {
     "Hello, World!"
 }
 
-async fn get_bucket(
-    State(state): State<AppState>,
-    Path(bucket): Path<String>,
-) -> StatusCode {
+async fn get_bucket(State(state): State<AppState>, Path(bucket): Path<String>) -> StatusCode {
     let db = state.database;
 
     let directory = DirectoryLayer::default();
@@ -56,14 +54,9 @@ async fn create_bucket(
 
     trx.commit().await.unwrap();
     match new_bucket {
-        Ok(dir) => {
-            (StatusCode::CREATED, dir.get_path().join("/").to_string())
-        }
-        Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("{:?}", e))
-        }
+        Ok(dir) => (StatusCode::CREATED, dir.get_path().join("/").to_string()),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{:?}", e)),
     }
-
 }
 
 async fn download(
@@ -94,7 +87,10 @@ async fn download(
         let body = Body::from(vec);
         Ok(body)
     } else {
-        Err((StatusCode::INTERNAL_SERVER_ERROR, "No bucket found".to_string()))
+        Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "No bucket found".to_string(),
+        ))
     }
 }
 
@@ -104,6 +100,7 @@ async fn put_object(
     body: Body,
 ) -> (StatusCode, String) {
     let db = state.database;
+
     println!("upload file {} {}", &bucket, &file_name);
 
     let mut stream = body.into_data_stream();
@@ -191,12 +188,26 @@ async fn main() {
         .route("/:bucket/:file_name", get(download))
         .route("/:bucket", put(create_bucket))
         .route("/:bucket", get(get_bucket))
+        .with_state(state.clone());
+
+    let router_admin = Router::new()
+        .route("/", get(get_object))
+        .route("/:bucket", put(create_bucket))
+        .route("/:bucket", get(get_bucket))
+        .route("/:bucket/:file_name", put(put_object))
+        .route("/:bucket/:file_name", get(download))
         .with_state(state);
 
     println!("start service on port 3000");
     // run our app with hyper, listening globally on port 3000
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, router).await.unwrap();
+    let listener_admin = tokio::net::TcpListener::bind("0.0.0.0:4000").await.unwrap();
+    let (a, b) = join!(
+        axum::serve(listener, router),
+        axum::serve(listener_admin, router_admin),
+    );
+    a.unwrap();
+    b.unwrap();
 
     drop(network);
 }

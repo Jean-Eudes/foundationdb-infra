@@ -46,8 +46,8 @@ RUN echo "docker:docker@10.88.0.2:4500" > /etc/foundationdb/fdb.cluster
 COPY --from=builder /app/target/release/foundationdb-s3 .
 # ADD .github/docker/run.sh /app/docker_entrypoint.sh
 
-
 EXPOSE 3000 
+EXPOSE 4000
 
 # Set the command to run on container start
 ENTRYPOINT ["./foundationdb-s3"]
