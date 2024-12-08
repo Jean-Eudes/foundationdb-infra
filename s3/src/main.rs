@@ -7,17 +7,15 @@ use axum::{
     routing::{get, put},
     Router,
 };
-use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{BufMut, BytesMut};
 use foundationdb::directory::{Directory, DirectoryLayer};
-use foundationdb::tuple::Subspace;
 use foundationdb::{Database, RangeOption};
 use futures::stream::StreamExt;
-use std::io::Cursor;
 use std::sync::Arc;
 use std::usize;
 
 const MAX_SIZE: usize = 90 * 1024;
+const DATA_PREFIX: &'static str = "data";
 
 #[derive(Clone)]
 struct AppState {
@@ -30,26 +28,19 @@ async fn get_object<'a>() -> &'a str {
 
 async fn get_bucket(
     State(state): State<AppState>,
-    Path(file_name): Path<String>,
-) -> impl IntoResponse {
+    Path(bucket): Path<String>,
+) -> StatusCode {
     let db = state.database;
 
+    let directory = DirectoryLayer::default();
     let trx = db.create_trx().unwrap();
-    let file_name_key = Subspace::from((&file_name, "data"));
 
-    let opt = RangeOption::from(file_name_key.range());
-
-    let mut x = trx.get_ranges_keyvalues(opt, false);
-
-    let mut vec = vec![];
-    while let Some(message) = x.next().await {
-        let value = message.unwrap();
-        let data = value.value();
-        vec.put(data)
+    let x = directory.exists(&trx, &[bucket]).await.unwrap();
+    if x {
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
     }
-
-    let body = Body::from(vec);
-    body
 }
 
 async fn create_bucket(
@@ -61,13 +52,15 @@ async fn create_bucket(
     let directory = DirectoryLayer::default();
     let trx = db.create_trx().unwrap();
 
-    let new_directory = directory.create(&trx, &[bucket], None, None).await;
-    match new_directory {
+    let new_bucket = directory.create(&trx, &[bucket], None, None).await;
+
+    trx.commit().await.unwrap();
+    match new_bucket {
         Ok(dir) => {
             (StatusCode::CREATED, dir.get_path().join("/").to_string())
         }
-        Err(_e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, "r".to_string())
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("{:?}", e))
         }
     }
 
@@ -76,25 +69,33 @@ async fn create_bucket(
 async fn download(
     State(state): State<AppState>,
     Path((bucket, file_name)): Path<(String, String)>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     let db = state.database;
 
-    let trx = db.create_trx().unwrap();
-    let file_name_key = Subspace::from((&bucket, &file_name, "data"));
+    let transaction = db.create_trx().unwrap();
 
-    let opt = RangeOption::from(file_name_key.range());
+    let directory = DirectoryLayer::default();
+    let current_bucket = directory.open(&transaction, &[bucket], None).await;
 
-    let mut x = trx.get_ranges_keyvalues(opt, false);
+    if let Ok(bucket) = current_bucket {
+        let file_name_key = bucket.subspace(&(&file_name, DATA_PREFIX)).unwrap();
 
-    let mut vec = vec![];
-    while let Some(message) = x.next().await {
-        let value = message.unwrap();
-        let data = value.value();
-        vec.put(data)
+        let opt = RangeOption::from(file_name_key.range());
+
+        let mut x = transaction.get_ranges_keyvalues(opt, false);
+
+        let mut vec = vec![];
+        while let Some(message) = x.next().await {
+            let value = message.unwrap();
+            let data = value.value();
+            vec.put(data)
+        }
+
+        let body = Body::from(vec);
+        Ok(body)
+    } else {
+        Err((StatusCode::INTERNAL_SERVER_ERROR, "No bucket found".to_string()))
     }
-
-    let body = Body::from(vec);
-    body
 }
 
 async fn put_object(
@@ -103,66 +104,73 @@ async fn put_object(
     body: Body,
 ) -> (StatusCode, String) {
     let db = state.database;
-    println!("download file {}", &file_name);
+    println!("upload file {} {}", &bucket, &file_name);
 
     let mut stream = body.into_data_stream();
     let mut buffer = BytesMut::with_capacity(MAX_SIZE);
-
-    let transaction = db.create_trx().unwrap();
     let mut part = 1;
     let mut size: usize = 0;
-    let file_name_key = Subspace::from((&bucket, &file_name));
-    let data_key = file_name_key.subspace(&"data");
-    while let Some(message) = stream.next().await {
-        let mut data = &message.unwrap()[..];
-        size += data.len();
-        if buffer.len() + data.len() < MAX_SIZE {
-            buffer.put_slice(&data);
-            continue;
-        }
 
-        if buffer.len() + data.len() == MAX_SIZE {
-            buffer.put_slice(&data);
+    let transaction = db.create_trx().unwrap();
+    let directory = DirectoryLayer::default();
+    let current_bucket = directory.open(&transaction, &[bucket], None).await;
+
+    if let Ok(bucket) = current_bucket {
+        let data_key = bucket.subspace(&(&file_name, DATA_PREFIX)).unwrap();
+        while let Some(message) = stream.next().await {
+            let mut data = &message.unwrap()[..];
+            size += data.len();
+            if buffer.len() + data.len() < MAX_SIZE {
+                buffer.put_slice(&data);
+                continue;
+            }
+
+            if buffer.len() + data.len() == MAX_SIZE {
+                buffer.put_slice(&data);
+                transaction.set(&data_key.pack(&part), &buffer[..]);
+                part = part + 1;
+                buffer.clear();
+                continue;
+            }
+
+            while buffer.len() + data.len() >= MAX_SIZE {
+                let remaining_capacity = MAX_SIZE - buffer.len();
+                buffer.put_slice(&data[0..remaining_capacity]);
+                transaction.set(&data_key.pack(&part), &buffer[..]);
+                buffer.clear();
+                part = part + 1;
+                data = &data[remaining_capacity..];
+            }
+
+            let remaining = &data[0..data.len()];
+            buffer.put_slice(remaining);
+        }
+        transaction.set(
+            format!("{}/size", &file_name).as_bytes(),
+            &size.to_ne_bytes(),
+        );
+
+        if buffer.len() != 0 {
             transaction.set(&data_key.pack(&part), &buffer[..]);
-            part = part + 1;
-            buffer.clear();
-            continue;
         }
 
-        while buffer.len() + data.len() >= MAX_SIZE {
-            let remaining_capacity = MAX_SIZE - buffer.len();
-            buffer.put_slice(&data[0..remaining_capacity]);
-            transaction.set(&data_key.pack(&part), &buffer[..]);
-            buffer.clear();
-            part = part + 1;
-            data = &data[remaining_capacity..];
+        println!("start commit");
+        let commit = transaction.commit().await;
+        println!("commit done");
+
+        match commit {
+            Ok(_) => {
+                println!("commit success");
+                (StatusCode::CREATED, file_name)
+            }
+            Err(e) => {
+                eprintln!("commit failed, {}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, file_name)
+            }
         }
-
-        let remaining = &data[0..data.len()];
-        buffer.put_slice(remaining);
-    }
-    transaction.set(
-        format!("{}/size", &file_name).as_bytes(),
-        &size.to_ne_bytes(),
-    );
-
-    if buffer.len() != 0 {
-        transaction.set(&data_key.pack(&part), &buffer[..]);
-    }
-
-    println!("start commit");
-    let commit = transaction.commit().await;
-    println!("commit done");
-
-    match commit {
-        Ok(_) => {
-            println!("commit success");
-            (StatusCode::CREATED, file_name)
-        }
-        Err(e) => {
-            eprintln!("commit failed, {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, file_name)
-        }
+    } else {
+        eprintln!("commit failed, {:?}", current_bucket);
+        (StatusCode::BAD_REQUEST, "Bucket not found".to_string())
     }
 }
 
